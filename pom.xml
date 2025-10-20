@@ -19,7 +19,7 @@
 
     <properties>
         <java.version>21</java.version>
-        <jena.version>5.2.0</jena.version>
+        <jena.version>5.6.0</jena.version>
         <shacl.version>1.4.3</shacl.version>
         <junit.jupiter.version>5.10.0</junit.jupiter.version>
         <maven-surefire-plugin.version>3.5.2</maven-surefire-plugin.version>
