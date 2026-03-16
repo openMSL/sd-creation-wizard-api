@@ -12,7 +12,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
@@ -20,26 +19,40 @@ import java.util.Objects;
 
 /**
  * 'getRepoAndCopyShaclFiles' is the primary method called from the controller class.
- * If the Gx4FmFramework is enabled it clones or pulls the "/ontology-management-base" Repository
- * and copy the needed shapes into the "shapes" dir
+ * If the Gx4FmFramework is enabled it clones or pulls the ontology-management-base
+ * repository and copies the SHACL shape files into the shapes directory.
+ *
+ * <p>The repository URL and the subdirectory that contains the schema folders
+ * can be overridden via system properties or environment variables:
+ * <ul>
+ *   <li>{@code GX4FM_REPO_URL} – Git clone URL (default: ASCS-eV/ontology-management-base)</li>
+ *   <li>{@code GX4FM_SHAPES_ROOT} – subdirectory inside the repo (default: {@code artifacts})</li>
+ * </ul>
  */
 @Service
 public class Gx4fmService {
 
-    private static final String REPO_URL = "https://github.com/GAIA-X4PLC-AAD/ontology-management-base.git";
+    private static final String DEFAULT_REPO_URL = "https://github.com/ASCS-eV/ontology-management-base.git";
+    private static final String DEFAULT_SHAPES_ROOT = "artifacts";
     private static final Logger logger = LoggerFactory.getLogger(Gx4fmService.class);
-    private static final List<String> skipFiles = Arrays.asList("gx", "src");
+
+    private static final String REPO_URL = System.getProperty(
+            "GX4FM_REPO_URL",
+            System.getenv().getOrDefault("GX4FM_REPO_URL", DEFAULT_REPO_URL));
+
+    private static final String SHAPES_ROOT = System.getProperty(
+            "GX4FM_SHAPES_ROOT",
+            System.getenv().getOrDefault("GX4FM_SHAPES_ROOT", DEFAULT_SHAPES_ROOT));
 
     //@Value("${sdcreationwizard.gx4fm.enabled}") //TODO use with a startup runner instead of the hardcoded value
     public static final boolean isGx4FmFrameworkEnabled = true;
 
 
     public static void getRepoAndCopyShaclFiles() {
-        logger.info("Starting to process ontology-management-base Repo... ");
-        File localPath = new File("./ontology-management-base_temp"); // Specify a temp local path
+        logger.info("Processing ontology-management-base from {} (shapes root: {})...", REPO_URL, SHAPES_ROOT);
+        File localPath = new File("./ontology-management-base_temp");
 
         if (localPath.exists()) {
-            //if local repository exist discard locale changes and pull origin
             try (Git git = Git.open(localPath)) {
                 if (!git.status().call().isClean()) {
                     git.reset().setMode(org.eclipse.jgit.api.ResetCommand.ResetType.HARD).call();
@@ -50,7 +63,6 @@ public class Gx4fmService {
                 return;
             }
         } else {
-            // clone repo if not exists
             try {
                 Git.cloneRepository()
                 .setURI(REPO_URL)
@@ -63,7 +75,6 @@ public class Gx4fmService {
             }
         }
         try {
-            // Prepare the destination path
             File destFolder = new File("./shapes/gx4fm-plc-aad/Other");
             if (destFolder.exists()) {
                 deleteContent(destFolder);
@@ -71,27 +82,38 @@ public class Gx4fmService {
                 destFolder.mkdirs();
             }
 
-            copyShaclFiles(localPath, destFolder);
+            File scanRoot = SHAPES_ROOT.equals(".")
+                    ? localPath
+                    : new File(localPath, SHAPES_ROOT);
+
+            if (!scanRoot.exists()) {
+                logger.warn("Shapes root '{}' not found in cloned repo, falling back to repo root", SHAPES_ROOT);
+                scanRoot = localPath;
+            }
+
+            copyShaclFiles(scanRoot, destFolder);
         } catch (IOException ex) {
             logger.error("Failed to copy files: {}  ", ex.getMessage());
         }
     }
 
     /**
-     * Search for "_shacl.ttl" files and copy to the "shapes" folder
-     * @param localPath File
-     * @throws IOException if copy fails
+     * Search for "_shacl.ttl" files in each subdirectory of {@code scanRoot}
+     * and copy them to the shapes folder.
      */
-    private static void copyShaclFiles(File localPath, File destFolder) throws IOException {
-        // Iterate through each sub folder in the parent folder to find the "_shacl.ttl" files and copy them
-        for (File folder : Objects.requireNonNull(localPath.listFiles())) {
-            if (folder.isDirectory() && !skipFiles.contains(folder.getName())) {
-                for (File file : Objects.requireNonNull(folder.listFiles())) {
-                    if (file.isFile() && file.getName().contains("_shacl.ttl")) {
-                        logger.info("Copy shacl file {}", file.getName());
-                        Path targetPath = destFolder.toPath().resolve(file.getName());
-                        Files.copy(file.toPath(), targetPath, StandardCopyOption.REPLACE_EXISTING);
-                    }
+    private static void copyShaclFiles(File scanRoot, File destFolder) throws IOException {
+        File[] children = scanRoot.listFiles();
+        if (children == null) {
+            logger.warn("Cannot list files in {}", scanRoot);
+            return;
+        }
+        for (File folder : children) {
+            if (!folder.isDirectory()) continue;
+            for (File file : Objects.requireNonNull(folder.listFiles())) {
+                if (file.isFile() && file.getName().contains("_shacl.ttl")) {
+                    logger.info("Copy shacl file {}", file.getName());
+                    Path targetPath = destFolder.toPath().resolve(file.getName());
+                    Files.copy(file.toPath(), targetPath, StandardCopyOption.REPLACE_EXISTING);
                 }
             }
         }
@@ -99,7 +121,6 @@ public class Gx4fmService {
 
     /**
      * Delete all files from dir
-     * @param directory File
      */
     private static void deleteContent(File directory){
         Collection<File> shaclFilesInDir = List.of(Objects.requireNonNull(directory.listFiles()));
