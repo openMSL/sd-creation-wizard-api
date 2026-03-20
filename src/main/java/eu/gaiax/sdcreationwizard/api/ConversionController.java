@@ -35,15 +35,15 @@ import static java.util.stream.Collectors.groupingBy;
 public class ConversionController {
     private static final Logger logger = LoggerFactory.getLogger(ConversionController.class);
     private static final File PROCESSED_DIR = new File(ConversionService.PROCESSED_DIR);
-    private static final List<String> FRAMEWORK_WITH_NESTED_SHAPES = Arrays.asList("plc-aad-trust-framework","gx4fm-plc-aad");
+    private static final List<String> FRAMEWORK_WITH_NESTED_SHAPES = Arrays.asList("plc-aad-trust-framework","gx4fm-plc-aad","envited-x");
     private static final Map<String, Map<String, List<String>>> ecosystemToCategoryToShaclFileMap = createEcosystemToShaclFileMap();
     private static final Map<String, Model> ecosystemToNodeShapeModels = loadNodeShapeModels();
     private static final String OPTIONAL_ECOSYSTEM = "gx4fm-plc-aad";
 
 
     static {
-        //if is Gx4FmFramework enabled get the needed files before processing the shape dir
-        if(Gx4fmService.isGx4FmFrameworkEnabled){
+        //if is Gx4FmFramework or ENVITED-X enabled get the needed files before processing the shape dir
+        if(Gx4fmService.isGx4FmFrameworkEnabled || Gx4fmService.isEnvitedXEnabled){
             Gx4fmService.getRepoAndCopyShaclFiles();
         }
 
