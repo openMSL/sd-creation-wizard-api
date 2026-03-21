@@ -114,7 +114,7 @@ public class ConversionController {
     private static void convertTurtleFileToJson(String ecosystem, String category, String filename) {
         logger.info("Converting file: {}", filename);
 
-        // Convert SHACL to JSONS
+        // Convert SHACL to JSON
         ShaclModel shaclModel;
         try {
             if (FRAMEWORK_WITH_NESTED_SHAPES.contains(ecosystem)) { //use the nodeShapeModel for nested shapes
@@ -130,6 +130,14 @@ public class ConversionController {
             }
         } catch (FileNotFoundException e) {
             throw new IllegalStateException(e);
+        } catch (Exception e) {
+            logger.error("Shape conversion failed for {}/{}/{}: {}", ecosystem, category, filename, e.getMessage());
+            return;
+        }
+
+        if (shaclModel == null) {
+            logger.warn("No shapes produced for {}/{}/{}", ecosystem, category, filename);
+            return;
         }
 
         String jsonFilename = ShaclFileUtils.getJsonFilename(filename);

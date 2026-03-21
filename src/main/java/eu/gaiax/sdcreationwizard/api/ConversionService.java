@@ -58,6 +58,7 @@ public class ConversionService {
         var shapes = new ShapesGraph(model).getRootShapes().stream()
                 .map(Shape::getShapeResource)
                 .map(shape -> constructVicShape(shape, prefixList))
+                .filter(Objects::nonNull)
                 .collect(Collectors.toList());
         // sort shapes so the deepest shapes are at first and can be handled correctly by the frontend.
         var shapesSorted = shapes.stream()
@@ -79,11 +80,36 @@ public class ConversionService {
             //sort shapes in reverse order, the deepest shapes are at first and can be handled correctly by the frontend.
             Collections.reverse(shapeNames);
 
-            List<VicShape> shapes = new ShapesGraph(propertyModel).getRootShapes().stream()
+            // Collect shapes from BOTH getRootShapes() (targeted shapes) and
+            // direct sh:NodeShape lookups (sub-shapes without sh:targetClass like
+            // ManifestLinkReferenceShape, ExtendedLinkShape, etc.).
+            // getRootShapes() only returns shapes with explicit targets, so
+            // sub-shapes referenced via sh:node would be missed.
+            ShapesGraph sg = new ShapesGraph(propertyModel);
+            Map<String, SHShape> shapesByUri = new LinkedHashMap<>();
+
+            // 1. Root shapes from ShapesGraph (targeted shapes)
+            sg.getRootShapes().stream()
                     .map(Shape::getShapeResource)
-                    .filter(shapeResource -> shapeNames.contains(shapeResource.getURI()))
+                    .filter(s -> shapeNames.contains(s.getURI()))
+                    .forEach(s -> shapesByUri.put(s.getURI(), s));
+
+            // 2. Non-root NodeShapes referenced in shapeNames but not in getRootShapes().
+            //    Use ShapesGraph.getShape() which returns SHShape wrappers from TopBraid's
+            //    enhanced model (plain res.as(SHShape.class) fails without the personality).
+            for (String uri : shapeNames) {
+                if (!shapesByUri.containsKey(uri)) {
+                    Shape shape = sg.getShape(org.apache.jena.graph.NodeFactory.createURI(uri));
+                    if (shape != null) {
+                        shapesByUri.put(uri, shape.getShapeResource());
+                    }
+                }
+            }
+
+            List<VicShape> shapes = shapesByUri.values().stream()
                     .sorted(Comparator.comparingInt(shape -> shapeNames.indexOf(shape.getURI())))
                     .map(shape -> constructVicShape(shape, prefixList))
+                    .filter(Objects::nonNull)
                     .collect(Collectors.toList());
 
             return new ShaclModel(prefixList, shapes);
@@ -94,25 +120,48 @@ public class ConversionService {
     private static List<String> findSubNodeNames(Model model, Model propertyModel) {
         StmtIterator stmtIterator = model.listStatements(null, RDF.type, SH.NodeShape);
 
-        if (stmtIterator.hasNext()) {
+        // Iterate ALL NodeShapes in the individual file, not just the first one.
+        // ENVITED-X domain files define multiple shapes per file (root + sub-shapes);
+        // taking only the first one would miss the main shape if iteration order
+        // places a sub-shape first.
+        List<String> shapeNames = new ArrayList<>();
+        while (stmtIterator.hasNext()) {
             Statement statement = stmtIterator.nextStatement();
             Resource shape = statement.getSubject();
-            // A list to hold unique shape names
-            List<String> shapeNames = new ArrayList<>();
-            findNestedNodeShapes(shape.asResource().getURI(), propertyModel, shapeNames);
-            return shapeNames;
+            String uri = shape.isURIResource() ? shape.getURI() : null;
+            if (uri != null) {
+                findNestedNodeShapes(uri, propertyModel, shapeNames);
+            }
         }
 
-        return null;
+        return shapeNames.isEmpty() ? null : shapeNames;
     }
 
     private static void findNestedNodeShapes(String shapeUri, Model model, List<String> shapeNames) {
-        // Get the URI of the nested shape, and the shape with URI "Shape"
-        String uri = shapeUri.contains("Shape") ? shapeUri : shapeUri.concat("Shape");
+        if (shapeUri == null) return;
+        // Resolve the URI: try as-is first, then append "Shape" (Gaia-X convention).
+        // ENVITED-X domains like openlabel-v2 name shapes without "Shape" suffix.
+        String uri;
+        if (shapeUri.contains("Shape") || model.contains(model.getResource(shapeUri), RDF.type, SH.NodeShape)) {
+            uri = shapeUri;
+        } else {
+            uri = shapeUri.concat("Shape");
+        }
         if (shapeNames.contains(uri)) return;
-        shapeNames.add(uri);
-        //get the resource from the model
+
+        // Check if this shape actually exists in the model before processing
         Resource shapeResource = model.getResource(uri);
+        if (!model.containsResource(shapeResource) ||
+                !model.listStatements(shapeResource, SH.property, (RDFNode) null).hasNext()) {
+            // Shape not defined in this model (external reference) — record the URI
+            // so the filter still matches it, but don't try to traverse its properties.
+            if (model.contains(shapeResource, RDF.type, SH.NodeShape)) {
+                shapeNames.add(uri);
+            }
+            return;
+        }
+        shapeNames.add(uri);
+
         // Iterate over properties of the shape resource and find nested nodes
         List<Statement> propertyShapes = model.listStatements(shapeResource, SH.property, (RDFNode) null).toList();
         for (Statement propertyShapeStmt : propertyShapes) {
@@ -122,10 +171,26 @@ public class ConversionService {
                List<RDFNode> orList = propertyShape.getProperty(SH.or).getList().asJavaList();
                 for (RDFNode node : orList) {
                     if (node.isResource()) {
+                        // Handle sh:node directly inside sh:or item
                         List <Statement> nestedNodeShapes = model.listStatements(node.asResource(), SH.node, (RDFNode) null).toList();
-                        //add nested node shape to the list and find the sub nodes
                         for  (Statement nodeShapeStmt : nestedNodeShapes)
                             findNestedNodeShapes(nodeShapeStmt.getObject().asResource().getURI(), model, shapeNames);
+
+                        // Handle sh:and inside sh:or item — traverse each element
+                        if (node.asResource().hasProperty(SH.and)) {
+                            try {
+                                List<RDFNode> andList = node.asResource().getProperty(SH.and).getList().asJavaList();
+                                for (RDFNode andNode : andList) {
+                                    if (andNode.isResource()) {
+                                        List<Statement> andNestedNodes = model.listStatements(andNode.asResource(), SH.node, (RDFNode) null).toList();
+                                        for (Statement andNodeStmt : andNestedNodes)
+                                            findNestedNodeShapes(andNodeStmt.getObject().asResource().getURI(), model, shapeNames);
+                                    }
+                                }
+                            } catch (Exception e) {
+                                logger.warn("Could not parse sh:and list in sh:or for shape {}: {}", uri, e.getMessage());
+                            }
+                        }
                     }
                 }
             }
@@ -250,7 +315,21 @@ public class ConversionService {
 
     private static VicShape constructVicShape(SHShape shape, List<Map<String, String>> prefixList) {
         var properties = extractProperties(shape, prefixList);
-        var target = shape.getProperty(SH.targetClass).getObject().asResource();
+
+        // Resolve the target class for the shape name and prefix.
+        // Shapes without sh:targetClass (e.g. sub-shapes, union shapes) use their
+        // own URI so they still appear in the output and can be referenced by
+        // parent shapes.
+        Statement targetClassStmt = shape.getProperty(SH.targetClass);
+        Resource target;
+        if (targetClassStmt != null) {
+            target = targetClassStmt.getObject().asResource();
+        } else if (shape.isURIResource()) {
+            target = shape.asResource();
+        } else {
+            logger.warn("Shape {} has no sh:targetClass and no URI, skipping", shape);
+            return null;
+        }
 
         return new VicShape(
                 properties,
@@ -298,13 +377,20 @@ public class ConversionService {
         var or = new ArrayList<ShapeProperties>();
         for (RDFNode rdfNode : propertyShape.getProperty(SH.or).getList().asJavaList()) {
 
-            Map<String, String> datatype = getDatatype(rdfNode.asResource(), prefixList);
-            datatype = processShNodekind(rdfNode.asResource(), datatype);
-            ClassConstraint clazz = getClassConstraint(rdfNode.asResource(), prefixList, SH.class_);
-            ClassConstraint path = getClassConstraint(rdfNode.asResource(), prefixList, SH.path);
-            Integer minCount = readIntProperty(rdfNode.asResource(), SH.minCount);
-            Integer maxCount = readIntProperty(rdfNode.asResource(), SH.maxCount);
-            String children = getNode(rdfNode.asResource(), SH.node);
+            // Skip complex constraint structures that can't be rendered as form fields
+            Resource constraint = rdfNode.asResource();
+            if (constraint.hasProperty(SH.and) || constraint.hasProperty(SH.property)) {
+                logger.debug("Skipping complex sh:and/sh:property constraint in sh:or list");
+                continue;
+            }
+
+            Map<String, String> datatype = getDatatype(constraint, prefixList);
+            datatype = processShNodekind(constraint, datatype);
+            ClassConstraint clazz = getClassConstraint(constraint, prefixList, SH.class_);
+            ClassConstraint path = getClassConstraint(constraint, prefixList, SH.path);
+            Integer minCount = readIntProperty(constraint, SH.minCount);
+            Integer maxCount = readIntProperty(constraint, SH.maxCount);
+            String children = getNode(constraint, SH.node);
             or.add(new ShapeProperties(path, null, datatype, clazz, minCount, maxCount, children));
         }
         return or;

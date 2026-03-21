@@ -155,10 +155,15 @@ public class Gx4fmService {
         }
 
         // --- gx4fm-plc-aad ecosystem (legacy flat copy) ---
+        // When envited-x is enabled, exclude domains already mapped there to
+        // avoid duplicate shapes across ecosystems.
+        Set<String> excludeDomains = isEnvitedXEnabled
+                ? ENVITEDX_DOMAIN_TO_CATEGORY.keySet()
+                : Collections.emptySet();
         try {
             File gx4fmDest = new File("./shapes/gx4fm-plc-aad/Other");
             prepareDestFolder(gx4fmDest);
-            copyShaclFiles(scanRoot, gx4fmDest);
+            copyShaclFiles(scanRoot, gx4fmDest, excludeDomains);
         } catch (IOException ex) {
             logger.error("Failed to copy gx4fm-plc-aad files: {}  ", ex.getMessage());
         }
@@ -211,9 +216,10 @@ public class Gx4fmService {
 
     /**
      * Search for SHACL Turtle files in each subdirectory of {@code scanRoot}
-     * and copy them to the destination folder.
+     * and copy them to the destination folder, skipping any directory whose
+     * name is in {@code excludeDomains}.
      */
-    private static void copyShaclFiles(File scanRoot, File destFolder) throws IOException {
+    private static void copyShaclFiles(File scanRoot, File destFolder, Set<String> excludeDomains) throws IOException {
         File[] children = scanRoot.listFiles();
         if (children == null) {
             logger.warn("Cannot list files in {}", scanRoot);
@@ -221,6 +227,10 @@ public class Gx4fmService {
         }
         for (File folder : children) {
             if (!folder.isDirectory()) continue;
+            if (excludeDomains.contains(folder.getName())) {
+                logger.debug("Skipping domain '{}' (handled by envited-x ecosystem)", folder.getName());
+                continue;
+            }
             for (File file : Objects.requireNonNull(folder.listFiles())) {
                 if (file.isFile() && isShaclFile(file.getName())) {
                     logger.info("Copy shacl file {}", file.getName());
